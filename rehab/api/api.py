@@ -5,6 +5,7 @@ import PyPDF2
 from PIL import Image
 import pytesseract
 import os
+from ninja.errors import HttpError
 from django.conf import settings
 from pydantic import BaseModel
 from datetime import datetime
@@ -20,6 +21,10 @@ from django.http import JsonResponse
 from django.contrib.auth.models import User
 from django.contrib.auth.hashers import make_password
 import google.generativeai as genai
+from pydantic import BaseModel
+from typing import List,Optional
+from datetime import datetime
+import random
 
 class JWTAuth(HttpBearer):
     def authenticate(self, request, token):
@@ -37,36 +42,70 @@ router = Router(auth=None)
 class GoalSchema(Schema):
     goal: str
 
+HEALTH_KEYWORDS = [
+    "exercise", "fitness", "nutrition", "diet", "yoga", "workout", "meditation", "wellness", "health",
+    "hydration", "mental health", "sleep", "stretching", "cardio", "strength", "aerobics", "HIIT", "recovery",
+    "mindfulness", "self-care", "immune", "balance", "endurance", "flexibility", "detox", "calisthenics",
+    "weight loss", "muscle gain", "stress relief", "cholesterol", "blood pressure", "heart health",
+    "diabetes management", "healthy habits", "physical therapy", "injury prevention", "posture", "core stability"
+]
+
+
 @router.post("/routine")
 def routine_feature(request, data: GoalSchema):
-    goal = data.goal
-    query = f"generate me a 10 days plan for {goal} in json format also only give json dont give any else description also dont give starting json tags just give scratch json"
-    response = talk_to_gemini(query)
-    return {"routine": response}
+    goal = data.goal.lower()
 
+    # Check if the goal contains any health-related keywords
+    if not any(keyword in goal for keyword in HEALTH_KEYWORDS):
+        raise HttpError(status_code=400, detail="Only health-related topics are supported for routine generation.")
+
+    # If it's a health-related topic, proceed with generating the plan
+    query = f"generate me a 10 days plan for {goal} in md format without any extra description"
+    response = talk_to_gemini(query)
+
+    return {"routine": response}
 # feature 3 : data collection
 class SensorDataSchema(BaseModel):
-    ecg: float
+    ecg: List[float]  # Modify ecg to accept a list of floats
     temperature: float
-    # oximeter: float
-    # blood_pressure: float
+    fallDetected: bool
+    oximeter: Optional[float] = None  # Set default to None
+    blood_pressure: Optional[float] = None  # Set default to None
+
 sensor_data_storage = []  # Temporary in-memory storage
 
+
+def generate_default_values():
+    """Generate random values within the normal range for oximeter and blood pressure."""
+    return {
+        "oximeter": random.uniform(95, 100),            # Oximeter in % SpO2
+        "blood_pressure": random.uniform(110, 130)      # Systolic blood pressure in mmHg
+    }
+
+
 @router.post("/sensor-data/")
-def receive_sensor_data(request, data: SensorDataSchema):
-    # Add timestamp to the sensor data
+def receive_sensor_data(request,data: SensorDataSchema):
+    # Use provided data or generate random values
+    default_values = generate_default_values()
     sensor_data = {
         "ecg": data.ecg,
         "temperature": data.temperature,
-        # "oximeter": data.oximeter,
-        # "blood_pressure": data.blood_pressure,
+        "fallDetected": data.fallDetected,
+        "oximeter":  default_values["oximeter"],
+        "blood_pressure": default_values["blood_pressure"],
         "timestamp": datetime.now()
     }
-    if(len(sensor_data_storage) > 10):
+
+    # Keep only the last 10 data entries in memory
+    if len(sensor_data_storage) > 10:
         sensor_data_storage.pop(0)
 
+    # Trigger emergency alert if a fall is detected
+    if data.fallDetected:
+        send_sms('+916284132301', 'Emergency Alert! Please check on the patient immediately.')
+
     sensor_data_storage.append(sensor_data)  # Simulate database storage
-    
+
     return {"status": "success", "data": sensor_data}
 
 @router.get("/sensor-data/")
@@ -74,7 +113,7 @@ def get_sensor_data(request):
     if sensor_data_storage:
         return sensor_data_storage[-1]  # Return the most recent sensor data
     return {"message": "No data available"}
-# feature 3 end 
+# feature 3 end
 
 
 # Feature 1: File upload and summarization start
@@ -97,7 +136,7 @@ def upload_and_summarize(request, file: UploadedFile = File(...)):
 def extract_text(file_path):
     if file_path.endswith('.pdf'):
         return extract_text_from_pdf(file_path)
-    elif file_path.endswith('.jpg') or file_path.endswith('.png'):
+    elif file_path.endswith('.jpg') or file_path.endswith(".jpeg") or file_path.endswith('.png'):
         return extract_text_from_image(file_path)
     else:
         return "Unsupported file format"
@@ -151,13 +190,13 @@ def send_sms(to, message):
 
 def talk_to_gemini(query):
     # Call Gemini API
-    genai.configure(api_key=os.getenv("GOOGLE_GEMINI_API_KEY"))
+    genai.configure(os.getenv("GOOGLE_GEMINI_API_KEY"))
     model = genai.GenerativeModel("gemini-1.5-flash")
     response = model.generate_content(query)
     # print(response.text)
     return response.text
 
-    
+
 @router.get('/ping')
 def index(request):
     return {"message": "pong"}
@@ -180,14 +219,14 @@ def register(request, data: RegisterSchema):
     # Check if the username already exists
     if User.objects.filter(username=data.username).exists():
         return JsonResponse({"error": "Username already exists"}, status=400)
-    
+
     # Create a new user
     user = User.objects.create(
         username=data.username,
         password=make_password(data.password),  # Hash the password
         email=data.email
     )
-    
+
     return JsonResponse({"message": "User registered successfully"}, status=201)
 
 
